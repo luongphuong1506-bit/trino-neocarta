@@ -8,9 +8,13 @@ The script is produced by running the real neocarta pipeline against a recording
 driver, so it contains exactly the statements a direct ingest would execute
 (constraints, indexes, UNWIND ... MERGE batches), with parameters inlined.
 
+Settings come from a config file (--env-file, see config.example.env) or flags;
+all selected catalogs share one Trino connection (one OAuth2 login) and go into
+one output file.
+
 Usage:
-    .venv/Scripts/python export_cypher.py --catalog postgres -o out/postgres.cypher
-    .venv/Scripts/python export_cypher.py --catalog iceberg --values 3 -o out/iceberg.cypher
+    .venv/Scripts/python export_cypher.py --env-file prod.env
+    .venv/Scripts/python export_cypher.py --catalog postgres iceberg -o out/metadata.cypher
 """
 
 from __future__ import annotations
@@ -19,11 +23,12 @@ import argparse
 import datetime as dt
 import logging
 import math
+import os
 import re
 from pathlib import Path
 from typing import Any
 
-from ingest_trino import add_source_args, connect_trino, ingest_catalog
+from ingest_trino import add_source_args, connect_trino, ingest_all, parse_args
 
 log = logging.getLogger("export_cypher")
 
@@ -146,31 +151,36 @@ def dedupe_schema_statements(statements: list[str]) -> list[str]:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     add_source_args(parser)
-    parser.add_argument("-o", "--output", required=True, help="Path of the .cypher file to write")
-    parser.add_argument("--batch-size", type=int, default=500, help="Rows per UNWIND statement (default 500)")
+    parser.add_argument("-o", "--output", help="Path of the .cypher file to write [OUTPUT]")
+    parser.add_argument("--batch-size", type=int, help="Rows per UNWIND statement, default 500 [BATCH_SIZE]")
     parser.add_argument(
         "--neo4j-edition",
         choices=["community", "enterprise"],
-        default="community",
-        help="community -> UNIQUE constraints (work on both editions); enterprise -> NODE KEY constraints",
+        help="community (default) -> UNIQUE constraints, work on both editions; "
+        "enterprise -> NODE KEY constraints [NEO4J_EDITION]",
     )
-    args = parser.parse_args()
+    args = parse_args(parser)
+    args.output = args.output or os.getenv("OUTPUT") or "out/metadata.cypher"
+    args.batch_size = args.batch_size or int(os.getenv("BATCH_SIZE") or 500)
+    args.neo4j_edition = args.neo4j_edition or os.getenv("NEO4J_EDITION") or "community"
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 
     driver = RecordingDriver(edition=args.neo4j_edition, batch_size=args.batch_size)
-    conn = connect_trino(args.catalog)
+    conn = connect_trino()
     try:
-        ingest_catalog(conn, driver, args)
+        schemas = ingest_all(conn, driver, args)
     finally:
         conn.close()
+    if not schemas:
+        raise SystemExit("No schema matched - nothing exported (check CATALOGS / SCHEMAS)")
 
     statements = dedupe_schema_statements(driver.statements)
     header = (
-        f"// neocarta metadata export - catalog {args.catalog}\n"
+        f"// neocarta metadata export - {len(schemas)} schema(s): {', '.join(schemas)}\n"
         f"// generated {dt.datetime.now().isoformat(timespec='seconds')} by export_cypher.py\n"
         f"// {len(statements)} statements, run as a script (statements end with semicolons)\n"
-    )
+    ).replace(";", ",")  # a ';' inside a comment would split the first statement
     out = Path(args.output)
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(header + ";\n\n".join(statements) + ";\n", encoding="utf-8")

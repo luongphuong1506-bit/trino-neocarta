@@ -2,13 +2,15 @@
 
 TRINO_AUTH selects the mode:
 
-* ``none`` (default) - no authentication (local docker stack).
+* ``none`` (default) - no authentication (local docker test stack).
+* ``oauth2`` - Trino's OAuth2 login flow: the client prints/opens the IdP login URL in a
+  browser, then polls Trino for the token. Works with any Trino configured with
+  ``http-server.authentication.type=oauth2``; you log in once per run.
+* ``client_credentials`` - non-interactive: fetch an access token from the IdP token
+  endpoint with a service-account client (OAuth2 client-credentials grant) and refresh it
+  before it expires. ``OAUTH2_TOKEN_URL``, ``OAUTH2_CLIENT_ID``, ``OAUTH2_CLIENT_SECRET``,
+  optional ``OAUTH2_SCOPE``. (``keycloak`` and the ``KEYCLOAK_*`` names are accepted aliases.)
 * ``jwt`` - send a ready-made access token: ``TRINO_JWT_TOKEN``.
-* ``keycloak`` - fetch tokens from Keycloak with the client-credentials grant (service
-  account, no browser) and refresh them before they expire:
-  ``KEYCLOAK_TOKEN_URL`` (``https://<host>/realms/<realm>/protocol/openid-connect/token``),
-  ``KEYCLOAK_CLIENT_ID``, ``KEYCLOAK_CLIENT_SECRET``, optional ``KEYCLOAK_SCOPE``.
-* ``oauth2`` - interactive login: Trino redirects to Keycloak and the client opens a browser.
 
 Transport: ``TRINO_HTTP_SCHEME`` (``https`` when authenticating; the client refuses to send
 credentials over plain http) and ``TRINO_VERIFY`` (``true`` | ``false`` | path to a CA bundle).
@@ -33,8 +35,8 @@ log = logging.getLogger(__name__)
 _REFRESH_MARGIN_S = 30
 
 
-class _KeycloakBearer(AuthBase):
-    """requests auth hook that attaches a Keycloak access token, refreshing it when due."""
+class _ClientCredentialsBearer(AuthBase):
+    """requests auth hook that attaches an OAuth2 access token, refreshing it when due."""
 
     def __init__(self, token_url: str, client_id: str, client_secret: str, scope: str | None, verify) -> None:
         self.token_url = token_url
@@ -56,12 +58,12 @@ class _KeycloakBearer(AuthBase):
             data["scope"] = self.scope
         resp = requests.post(self.token_url, data=data, timeout=30, verify=self.verify)
         if resp.status_code != 200:
-            # Keycloak returns {"error": ..., "error_description": ...}; never log the secret.
-            raise RuntimeError(f"Keycloak token request failed ({resp.status_code}): {resp.text[:300]}")
+            # IdPs return {"error": ..., "error_description": ...}; never log the secret.
+            raise RuntimeError(f"OAuth2 token request failed ({resp.status_code}): {resp.text[:300]}")
         body = resp.json()
         self._token = body["access_token"]
         self._expires_at = time.monotonic() + int(body.get("expires_in", 300))
-        log.info("Obtained Keycloak access token (expires in %ss)", body.get("expires_in"))
+        log.info("Obtained OAuth2 access token (expires in %ss)", body.get("expires_in"))
 
     def token(self) -> str:
         with self._lock:
@@ -74,11 +76,11 @@ class _KeycloakBearer(AuthBase):
         return r
 
 
-class KeycloakClientCredentialsAuthentication(Authentication):
-    """trino.auth.Authentication that keeps a fresh Keycloak service-account token."""
+class ClientCredentialsAuthentication(Authentication):
+    """trino.auth.Authentication that keeps a fresh client-credentials access token."""
 
     def __init__(self, token_url: str, client_id: str, client_secret: str, scope: str | None = None, verify=True):
-        self._bearer = _KeycloakBearer(token_url, client_id, client_secret, scope, verify)
+        self._bearer = _ClientCredentialsBearer(token_url, client_id, client_secret, scope, verify)
 
     def set_http_session(self, http_session: Session) -> Session:
         http_session.auth = self._bearer
@@ -94,35 +96,46 @@ def _verify_from_env():
     return value  # path to a CA bundle
 
 
-def _require(name: str) -> str:
-    value = os.getenv(name)
+def _env(*names: str) -> str | None:
+    """First non-empty value among ``names`` (new name first, legacy aliases after)."""
+    for name in names:
+        value = os.getenv(name)
+        if value:
+            return value
+    return None
+
+
+def _require(*names: str) -> str:
+    value = _env(*names)
     if not value:
-        raise SystemExit(f"Environment variable {name} is required for TRINO_AUTH={os.getenv('TRINO_AUTH')}")
+        raise SystemExit(f"{names[0]} is required for TRINO_AUTH={os.getenv('TRINO_AUTH')}")
     return value
 
 
 def trino_connection_kwargs() -> dict:
     """Keyword arguments for ``trino.dbapi.connect`` derived from the environment."""
-    mode = os.getenv("TRINO_AUTH", "none").lower()
+    mode = (os.getenv("TRINO_AUTH") or "none").lower()
     verify = _verify_from_env()
-    kwargs: dict = {"http_scheme": os.getenv("TRINO_HTTP_SCHEME", "http"), "verify": verify}
+    kwargs: dict = {"http_scheme": os.getenv("TRINO_HTTP_SCHEME") or "http", "verify": verify}
 
     if mode == "none":
         return kwargs
-    if mode == "jwt":
-        kwargs["auth"] = JWTAuthentication(_require("TRINO_JWT_TOKEN"))
-    elif mode == "keycloak":
-        kwargs["auth"] = KeycloakClientCredentialsAuthentication(
-            token_url=_require("KEYCLOAK_TOKEN_URL"),
-            client_id=_require("KEYCLOAK_CLIENT_ID"),
-            client_secret=_require("KEYCLOAK_CLIENT_SECRET"),
-            scope=os.getenv("KEYCLOAK_SCOPE"),
+    if mode == "oauth2":
+        # Login URL is printed and opened in the default browser; the token is cached for
+        # the lifetime of the connection (or in the OS keyring if `keyring` is installed).
+        kwargs["auth"] = OAuth2Authentication()
+    elif mode in ("client_credentials", "keycloak"):
+        kwargs["auth"] = ClientCredentialsAuthentication(
+            token_url=_require("OAUTH2_TOKEN_URL", "KEYCLOAK_TOKEN_URL"),
+            client_id=_require("OAUTH2_CLIENT_ID", "KEYCLOAK_CLIENT_ID"),
+            client_secret=_require("OAUTH2_CLIENT_SECRET", "KEYCLOAK_CLIENT_SECRET"),
+            scope=_env("OAUTH2_SCOPE", "KEYCLOAK_SCOPE"),
             verify=verify,
         )
-    elif mode == "oauth2":
-        kwargs["auth"] = OAuth2Authentication()
+    elif mode == "jwt":
+        kwargs["auth"] = JWTAuthentication(_require("TRINO_JWT_TOKEN"))
     else:
-        raise SystemExit(f"Unknown TRINO_AUTH={mode!r} (expected none, jwt, keycloak or oauth2)")
+        raise SystemExit(f"Unknown TRINO_AUTH={mode!r} (expected none, oauth2, client_credentials or jwt)")
 
     if kwargs["http_scheme"] != "https":
         log.warning("Sending credentials over plain http (TRINO_HTTP_SCHEME=http) - only for testing")

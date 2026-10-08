@@ -6,9 +6,10 @@ __pycache__/
 # Generated Cypher exports (may contain production metadata)
 out/
 
-# Local env / secrets
+# Local env / secrets (filled-in config files)
 .env
 *.env
+!config.example.env
 
 # Editors / OS
 .vscode/
