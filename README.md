@@ -19,6 +19,15 @@ uv venv .venv --python 3.11
 uv pip install --python .venv/Scripts/python.exe -r requirements.txt
 ```
 
+**Máy không truy cập được GitHub** (proxy chặn): tải zip của repo này qua trình duyệt (*Code → Download ZIP*), giải nén, rồi cài neocarta từ file wheel có sẵn trong `vendor/` (build từ đúng commit trong `requirements.txt`). Các thư viện phụ thuộc vẫn tải từ PyPI.
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\pip install vendor\neocarta-0.8.1-py3-none-any.whl trino
+```
+
+Không giải nén mã nguồn neocarta rồi chép vào `.venv\Lib`: neocarta đọc phiên bản qua package metadata nên phải cài bằng pip.
+
 ## 2. Điền cấu hình
 
 ```powershell
