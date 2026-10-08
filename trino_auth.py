@@ -92,6 +92,11 @@ def _verify_from_env():
     if value.lower() in ("true", "1", "yes"):
         return True
     if value.lower() in ("false", "0", "no"):
+        # One clear warning instead of urllib3's InsecureRequestWarning on every request.
+        import urllib3
+
+        urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+        log.warning("TLS certificate verification is disabled (TRINO_VERIFY=false)")
         return False
     return value  # path to a CA bundle
 
