@@ -1,0 +1,4 @@
+# Config/SQL files are mounted into Linux containers: keep LF line endings on every OS
+* text=auto eol=lf
+*.docx binary
+*.png binary

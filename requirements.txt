@@ -1,0 +1,4 @@
+# neocarta 0.8.1 is not on PyPI yet; pinned to the commit the Trino connector was built against
+# (it relies on internal base classes under neocarta.connectors.utils).
+neocarta[cli,mcp] @ git+https://github.com/neo4j-labs/neocarta@ba6bf7945bf9c60640c664a03ccc26d0013996bf
+trino

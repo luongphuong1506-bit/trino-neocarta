@@ -1,0 +1,18 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+
+# Generated Cypher exports (may contain production metadata)
+out/
+
+# Local env / secrets
+.env
+*.env
+
+# Editors / OS
+.vscode/
+.idea/
+Thumbs.db
+.DS_Store
+~$*.docx
